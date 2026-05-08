@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文件快传 - 安全无登录文件分享</title>
+  <meta name="description" content="端到端加密，无需登录，安全传输文件">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <h1>文件快传</h1>
+      </div>
+      <p class="subtitle">端到端加密 · 无需登录 · 即用即焚</p>
+    </header>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="send" id="tabSend">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+        发送文件
+      </button>
+      <button class="tab-btn" data-tab="receive" id="tabReceive">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        接收文件
+      </button>
+    </div>
+
+    <!-- Send Panel -->
+    <div class="panel active" id="panelSend">
+      <!-- Drop Zone -->
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-zone-content" id="dropZoneContent">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="upload-icon">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p class="drop-text">拖拽文件到此处</p>
+          <p class="drop-hint">或点击选择文件</p>
+        </div>
+        <div class="file-info hidden" id="fileInfo">
+          <div class="file-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+          </div>
+          <div class="file-details">
+            <span class="file-name" id="fileName">文件名</span>
+            <span class="file-size" id="fileSize">0 MB</span>
+          </div>
+          <button class="btn-icon" id="removeFile" title="移除文件">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <input type="file" id="fileInput" hidden>
+
+      <!-- Options -->
+      <div class="options">
+        <div class="option-row">
+          <label class="option-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+            加密密码
+          </label>
+          <div class="option-input-wrap">
+            <input type="password" class="option-input" id="password" placeholder="留空自动生成密钥" autocomplete="off">
+            <button class="btn-icon toggle-pw" id="togglePw" type="button" title="显示密码">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="option-row">
+          <label class="option-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <polyline points="12 6 12 12 16 14"/>
+            </svg>
+            过期时间
+          </label>
+          <select class="option-input option-select" id="expiry">
+            <option value="1">1 小时</option>
+            <option value="6" selected>6 小时</option>
+            <option value="24">24 小时</option>
+            <option value="168">7 天</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Upload Button -->
+      <button class="btn-primary" id="uploadBtn" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <span id="uploadBtnText">上传并生成分享链接</span>
+      </button>
+
+      <!-- Progress -->
+      <div class="progress-wrap hidden" id="progressWrap">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <span class="progress-text" id="progressText">加密中...</span>
+      </div>
+
+      <!-- Result -->
+      <div class="result hidden" id="result">
+        <div class="result-success">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+            <polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+          文件已加密上传
+        </div>
+        <div class="result-link-wrap">
+          <input type="text" class="result-link" id="shareLink" readonly>
+          <button class="btn-copy" id="copyLink">复制</button>
+        </div>
+        <p class="result-hint" id="resultHint">此链接包含解密密钥，请安全分享</p>
+        <div class="result-actions">
+          <button class="btn-secondary" id="showQr">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+              <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+            </svg>
+            显示二维码
+          </button>
+          <button class="btn-secondary" id="newTransfer">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            继续传输
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Receive Panel -->
+    <div class="panel" id="panelReceive">
+      <div class="receive-form">
+        <div class="option-row">
+          <label class="option-label">分享码</label>
+          <input type="text" class="option-input" id="receiveCode" placeholder="输入分享码或粘贴完整链接" autocomplete="off">
+        </div>
+        <div class="option-row" id="pwRow">
+          <label class="option-label">解密密码</label>
+          <input type="password" class="option-input" id="receivePw" placeholder="输入加密时设置的密码" autocomplete="off">
+        </div>
+        <button class="btn-primary" id="receiveBtn" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span id="receiveBtnText">获取文件</span>
+        </button>
+      </div>
+
+      <!-- Receive Progress -->
+      <div class="progress-wrap hidden" id="receiveProgress">
+        <div class="progress-bar">
+          <div class="progress-fill" id="receiveProgressFill"></div>
+        </div>
+        <span class="progress-text" id="receiveProgressText">准备中...</span>
+      </div>
+
+      <!-- Receive Result -->
+      <div class="receive-info hidden" id="receiveInfo">
+        <div class="file-info">
+          <div class="file-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+          </div>
+          <div class="file-details">
+            <span class="file-name" id="receiveFileName">文件名</span>
+            <span class="file-size" id="receiveFileSize">0 MB</span>
+          </div>
+        </div>
+        <button class="btn-primary" id="downloadBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          解密并下载
+        </button>
+      </div>
+    </div>
+
+    <!-- QR Modal -->
+    <div class="modal hidden" id="qrModal">
+      <div class="modal-overlay" id="qrOverlay"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>扫码下载</h3>
+          <button class="btn-icon" id="closeQr">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="qr-body" id="qrBody">
+          <div class="qr-loading">生成中...</div>
+        </div>
+        <p class="qr-hint">使用手机相机扫码即可打开</p>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast hidden" id="toast"></div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="security-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        端到端加密 · 文件在浏览器中加密后上传，服务器无法读取
+      </div>
+    </footer>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
