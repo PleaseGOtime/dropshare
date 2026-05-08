@@ -69,18 +69,25 @@ npm start
 ### 云服务器部署（2核2G 优化配置）
 
 1. 将项目上传到服务器
-2. 配置 `.env` 文件
-3. 安装依赖并启动：
+2. 安装依赖并启动：
 
 ```bash
 npm install
+npm start
+```
+
+浏览器访问 `http://服务器IP:8080` 即可使用。
+
+生产环境建议使用 PM2 管理进程：
+
+```bash
 npm install -g pm2
-pm2 start ecosystem.config.js   # 使用资源配置文件
+pm2 start ecosystem.config.js
 pm2 save
 pm2 startup
 ```
 
-4. 阿里云安全组入方向放行：
+3. 云服务器安全组入方向放行：
    - `TCP 3443`（HTTPS 文件互传）
    - `TCP 8080`（HTTP，可选调试用）
 
@@ -120,7 +127,7 @@ pm2 restart ecosystem.config.js  # 更新配置后重载
 | `UPLOAD_DIR` | `./uploads` | 文件存储目录 |
 | `MAX_FILE_SIZE` | `5368709120` | 最大文件大小（字节，5GB） |
 | `CORS_ORIGIN` | `*` | 跨域来源 |
-| `PUBLIC_URL` | `https://8.163.102.28:3443` | 公网地址 |
+| `PUBLIC_URL` | 空（自动使用服务器 IP） | 公网地址（有域名时设置） |
 | `TRUST_PROXY` | `false` | 是否在反向代理后方 |
 | `UPLOAD_MAX` | `30` | 每15分钟最大上传次数 |
 | `DOWNLOAD_MAX` | `100` | 每15分钟最大下载次数 |
