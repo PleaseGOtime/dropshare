@@ -253,44 +253,42 @@ async function uploadFile() {
       keyB64 = await exportKey(masterKey);
     }
 
-    // 3) Build a ReadableStream that encrypts chunks on-demand
-    //    and feeds them into a single HTTP request (no per-chunk round trips).
-    let chunkIndex = 0;
-    const encryptedStream = new ReadableStream({
-      async pull(controller) {
-        if (chunkIndex >= numChunks) {
-          controller.close();
-          return;
-        }
+    // 3) Encrypt all chunks into a single Blob, then upload in one request
+    //    Each chunk is encrypted separately (low memory: 4MB at a time),
+    //    but the upload is a single HTTP call (no per-chunk overhead).
+    const encryptedParts = [];
 
-        const i = chunkIndex++;
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, fileSize);
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, fileSize);
 
-        // Read raw chunk from file (4MB at a time — low memory)
-        const chunkData = await file.slice(start, end).arrayBuffer();
+      const chunkData = await file.slice(start, end).arrayBuffer();
 
-        // Encrypt with chunk-unique IV
-        const chunkIV = deriveChunkIV(masterIV, i);
-        const encrypted = await crypto.subtle.encrypt(
-          { name: 'AES-GCM', iv: chunkIV }, masterKey, chunkData
-        );
+      const chunkIV = deriveChunkIV(masterIV, i);
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: chunkIV }, masterKey, chunkData
+      );
 
-        controller.enqueue(new Uint8Array(encrypted));
+      encryptedParts.push(encrypted);
 
-        const pct = Math.round((i / numChunks) * 85);
-        setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
-          pct, `加密上传中 (${Math.min(i + 1, numChunks)}/${numChunks})`);
-      },
-    });
+      const pct = Math.round((i / numChunks) * 85);
+      setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
+        pct, `加密中 (${Math.min(i + 1, numChunks)}/${numChunks})`);
 
-    // 4) Single streaming upload — one HTTP request, encrypted bytes
-    //    flow to the server as they're produced.
+      // Yield to let UI update periodically
+      if (i % 10 === 0) await new Promise(r => setTimeout(r, 10));
+    }
+
+    // Build single blob and upload in one request
+    setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 85, '上传中');
+    const encryptedBlob = new Blob(encryptedParts);
+    // Clear the parts array so GC can free the individual ArrayBuffers
+    encryptedParts.length = 0;
+
     const uploadResp = await fetch(`/api/upload/${code}/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
-      body: encryptedStream,
-      duplex: 'half',
+      body: encryptedBlob,
     });
     if (!uploadResp.ok) throw new Error('上传失败');
 
