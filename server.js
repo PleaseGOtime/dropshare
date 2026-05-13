@@ -127,6 +127,14 @@ function generateCode() {
 
 // ─── Upload: Init Session ──────────────────────────────────────────
 app.post('/api/upload/init', uploadLimiter, (req, res) => {
+  // Validate file size upfront (original plaintext size)
+  const { size } = req.body;
+  if (size && parseInt(size) > MAX_FILE_SIZE) {
+    return res.status(413).json({
+      error: `文件超过大小限制 ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)}MB`,
+    });
+  }
+
   const code = generateCode();
   try {
     fs.mkdirSync(getFileDir(code), { recursive: true });
@@ -137,10 +145,10 @@ app.post('/api/upload/init', uploadLimiter, (req, res) => {
   }
 });
 
-// ─── Upload: Chunk (raw binary, streamed to disk) ──────────────────
-// No rate limit — init/complete already gate session creation.
-// Chunks are sent sequentially, so no file-corruption race.
-app.post('/api/upload/:code/chunk/:index', (req, res) => {
+// ─── Upload: Single streaming body (raw binary, written to disk) ───
+// Browser encrypts chunks 4MB at a time and streams them via a single
+// HTTP request — zero per-chunk overhead, natural backpressure.
+app.post('/api/upload/:code/stream', (req, res) => {
   const { code } = req.params;
 
   if (!/^[a-zA-Z0-9]+$/.test(code)) {
@@ -153,15 +161,7 @@ app.post('/api/upload/:code/chunk/:index', (req, res) => {
   }
 
   const dataPath = getDataPath(code);
-
-  // Enforce max file size
-  const currentSize = fs.existsSync(dataPath) ? fs.statSync(dataPath).size : 0;
-  const contentLength = parseInt(req.headers['content-length']) || 0;
-  if (currentSize + contentLength > MAX_FILE_SIZE) {
-    return res.status(413).json({ error: `文件超过大小限制 ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)}MB` });
-  }
-
-  const writeStream = fs.createWriteStream(dataPath, { flags: 'a' });
+  const writeStream = fs.createWriteStream(dataPath);
 
   req.pipe(writeStream);
 
@@ -170,17 +170,13 @@ app.post('/api/upload/:code/chunk/:index', (req, res) => {
   });
 
   writeStream.on('error', (err) => {
-    console.error('Chunk write error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: '写入分片失败' });
-    }
+    console.error('Stream write error:', err);
+    if (!res.headersSent) res.status(500).json({ error: '写入失败' });
   });
 
   req.on('error', (err) => {
-    console.error('Chunk read error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: '读取分片失败' });
-    }
+    console.error('Stream read error:', err);
+    if (!res.headersSent) res.status(500).json({ error: '读取失败' });
   });
 });
 

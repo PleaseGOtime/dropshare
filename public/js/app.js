@@ -210,7 +210,7 @@ function resetUploadResult() {
   hideProgress(dom.progressWrap, dom.progressFill);
 }
 
-/* ─── Upload (Chunked Encrypt + Upload) ──────────────────── */
+/* ─── Upload (Streaming Encrypt + Single Request) ──────────── */
 dom.uploadBtn.addEventListener('click', uploadFile);
 
 async function uploadFile() {
@@ -228,9 +228,16 @@ async function uploadFile() {
   const startTime = Date.now();
 
   try {
-    // 1) Create upload session
-    const initResp = await fetch('/api/upload/init', { method: 'POST' });
-    if (!initResp.ok) throw new Error('初始化上传失败');
+    // 1) Create upload session (validates file size upfront)
+    const initResp = await fetch('/api/upload/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size: fileSize }),
+    });
+    if (!initResp.ok) {
+      const err = await initResp.json();
+      throw new Error(err.error || '初始化上传失败');
+    }
     const { code } = await initResp.json();
     state.shareCode = code;
 
@@ -246,34 +253,47 @@ async function uploadFile() {
       keyB64 = await exportKey(masterKey);
     }
 
-    // 3) Encrypt & upload each chunk
-    for (let i = 0; i < numChunks; i++) {
-      const overallPct = Math.round((i / numChunks) * 85);
-      setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
-        overallPct, `加密上传中 (${i + 1}/${numChunks})`);
+    // 3) Build a ReadableStream that encrypts chunks on-demand
+    //    and feeds them into a single HTTP request (no per-chunk round trips).
+    let chunkIndex = 0;
+    const encryptedStream = new ReadableStream({
+      async pull(controller) {
+        if (chunkIndex >= numChunks) {
+          controller.close();
+          return;
+        }
 
-      // Let UI breathe between chunks
-      if (i % 10 === 0) await new Promise(r => setTimeout(r, 10));
+        const i = chunkIndex++;
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileSize);
 
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, fileSize);
-      const chunkBlob = file.slice(start, end);
-      const chunkData = await chunkBlob.arrayBuffer();
+        // Read raw chunk from file (4MB at a time — low memory)
+        const chunkData = await file.slice(start, end).arrayBuffer();
 
-      const chunkIV = deriveChunkIV(masterIV, i);
-      const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: chunkIV }, masterKey, chunkData
-      );
+        // Encrypt with chunk-unique IV
+        const chunkIV = deriveChunkIV(masterIV, i);
+        const encrypted = await crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: chunkIV }, masterKey, chunkData
+        );
 
-      const uploadResp = await fetch(`/api/upload/${code}/chunk/${i}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: encrypted,
-      });
-      if (!uploadResp.ok) throw new Error(`分片 ${i + 1}/${numChunks} 上传失败`);
-    }
+        controller.enqueue(new Uint8Array(encrypted));
 
-    // 4) Complete upload (write metadata)
+        const pct = Math.round((i / numChunks) * 85);
+        setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
+          pct, `加密上传中 (${Math.min(i + 1, numChunks)}/${numChunks})`);
+      },
+    });
+
+    // 4) Single streaming upload — one HTTP request, encrypted bytes
+    //    flow to the server as they're produced.
+    const uploadResp = await fetch(`/api/upload/${code}/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: encryptedStream,
+    });
+    if (!uploadResp.ok) throw new Error('上传失败');
+
+    // 5) Complete upload (write metadata)
     setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 90, '完成上传');
     const completeResp = await fetch(`/api/upload/${code}/complete`, {
       method: 'POST',
