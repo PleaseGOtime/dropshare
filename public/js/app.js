@@ -8,7 +8,7 @@ const state = {
 
 /* ─── Constants ────────────────────────────────────────── */
 const CHUNK_SIZE = 32 * 1024 * 1024; // 32MB — fewer chunks = less overhead
-const UPLOAD_POOL = 3;               // concurrent upload connections
+const UPLOAD_POOL = 5;               // concurrent upload connections
 
 /* ─── DOM refs ─────────────────────────────────────────── */
 const $ = (sel) => document.querySelector(sel);
@@ -468,9 +468,6 @@ async function downloadAndDecrypt() {
   const code = state.shareCode;
   if (!code) return;
 
-  // Show progress immediately — PBKDF2 (600k iterations) blocks 1-2s
-  setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 0, '连接中...');
-
   dom.downloadBtn.disabled = true;
   dom.downloadBtn.textContent = '下载中...';
 
@@ -484,6 +481,24 @@ async function downloadAndDecrypt() {
     const fileSize = parseInt(dom.downloadBtn.dataset.fileSize);
 
     const masterIV = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
+
+    // Try File System Access API for streaming writes (Chrome/Edge)
+    // Writes decrypted data directly to disk — O(1) memory for any file size
+    let writable = null;
+    if ('showSaveFilePicker' in window) {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: filename });
+        writable = await handle.createWritable();
+      } catch {
+        // User cancelled save dialog — abort silently
+        dom.downloadBtn.textContent = '解密并下载';
+        dom.downloadBtn.disabled = false;
+        return;
+      }
+    }
+
+    // Show progress before key derivation
+    setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 0, '连接中...');
 
     // 1) Resolve decryption key
     let masterKey;
@@ -501,10 +516,12 @@ async function downloadAndDecrypt() {
 
     // ChunkSize === 0 → old-format single-chunk file (backward compat)
     if (chunkSize === 0) {
-      await legacyDownload(code, masterKey, masterIV, filename);
+      await legacyDownload(code, masterKey, masterIV, filename, writable);
     } else {
-      await streamDownload(code, masterKey, masterIV, chunkSize, numChunks, fileSize, filename);
+      await streamDownload(code, masterKey, masterIV, chunkSize, numChunks, fileSize, filename, writable);
     }
+
+    if (writable) await writable.close();
 
     dom.downloadBtn.textContent = '解密并下载';
     dom.downloadBtn.disabled = false;
@@ -519,7 +536,7 @@ async function downloadAndDecrypt() {
 }
 
 /* ─── Legacy single-chunk download (backward compat) ─── */
-async function legacyDownload(code, key, iv, filename) {
+async function legacyDownload(code, key, iv, filename, writable) {
   setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 0, '下载中');
 
   const resp = await fetch('/api/data/' + encodeURIComponent(code));
@@ -534,13 +551,17 @@ async function legacyDownload(code, key, iv, filename) {
 
   const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, encrypted);
 
-  triggerDownload(decrypted, filename);
+  if (writable) {
+    await writable.write(decrypted);
+  } else {
+    triggerDownload(decrypted, filename);
+  }
   setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 100, '下载完成');
   showToast('文件解密并下载成功', 'success');
 }
 
 /* ─── Streaming chunked download ─────────────────────────── */
-async function streamDownload(code, masterKey, masterIV, chunkSize, numChunks, fileSize, filename) {
+async function streamDownload(code, masterKey, masterIV, chunkSize, numChunks, fileSize, filename, writable) {
   const encChunkSize = chunkSize + 16; // each encrypted chunk = plaintext + GCM tag
   const lastChunkPlainSize = fileSize - (numChunks - 1) * chunkSize;
   const lastEncChunkSize = lastChunkPlainSize + 16;
@@ -557,8 +578,10 @@ async function streamDownload(code, masterKey, masterIV, chunkSize, numChunks, f
   const reader = resp.body.getReader();
   let buffer = new Uint8Array(0);
   let chunkIndex = 0;
-  const decryptedParts = [];
   let downloadedBytes = 0;
+
+  // Only accumulate in memory if File System Access API is not available
+  const decryptedParts = writable ? null : [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -587,7 +610,11 @@ async function streamDownload(code, masterKey, masterIV, chunkSize, numChunks, f
         { name: 'AES-GCM', iv: chunkIV }, masterKey, encChunk
       );
 
-      decryptedParts.push(decrypted);
+      if (writable) {
+        await writable.write(decrypted);
+      } else {
+        decryptedParts.push(decrypted);
+      }
       chunkIndex++;
 
       const pct = Math.round((downloadedBytes / totalEncrypted) * 80);
@@ -601,12 +628,17 @@ async function streamDownload(code, masterKey, masterIV, chunkSize, numChunks, f
     throw new Error(`下载不完整 (收到 ${chunkIndex}/${numChunks} 个分片)`);
   }
 
-  setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 90, '生成文件');
-  await new Promise(r => setTimeout(r, 20));
-
-  triggerDownloadFromParts(decryptedParts, filename);
-  setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 100, '下载完成');
-  showToast('文件解密并下载成功', 'success');
+  if (writable) {
+    // Already streamed directly to disk — no need to assemble
+    setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 100, '下载完成');
+    showToast('文件解密并下载成功', 'success');
+  } else {
+    setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 90, '生成文件');
+    await new Promise(r => setTimeout(r, 20));
+    triggerDownloadFromParts(decryptedParts, filename);
+    setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 100, '下载完成');
+    showToast('文件解密并下载成功', 'success');
+  }
 
   setTimeout(() => {
     hideProgress(dom.receiveProgress, dom.receiveProgressFill);

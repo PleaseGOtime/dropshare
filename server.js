@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
+const { pipeline } = require('stream/promises');
 const https = require('https');
 const { execSync } = require('child_process');
 const QRCode = require('qrcode');
@@ -182,7 +183,7 @@ app.post('/api/upload/:code/chunk/:index', (req, res) => {
 });
 
 // ─── Upload: Complete (concatenate part files + write metadata) ────
-app.post('/api/upload/:code/complete', uploadLimiter, (req, res) => {
+app.post('/api/upload/:code/complete', uploadLimiter, async (req, res) => {
   const { code } = req.params;
 
   if (!/^[a-zA-Z0-9]+$/.test(code)) {
@@ -200,16 +201,24 @@ app.post('/api/upload/:code/complete', uploadLimiter, (req, res) => {
     return res.status(400).json({ error: '缺少必要参数' });
   }
 
-  // Concatenate part files (data.enc.0, data.enc.1, ...) into data.enc
+  // Concatenate part files asynchronously using stream pipeline
+  // Non-blocking: each pipe completes before the next starts, O(1) memory
   const dataPath = getDataPath(code);
   const n = parseInt(numChunks) || 1;
-  for (let i = 0; i < n; i++) {
-    const partPath = dataPath + '.' + i;
-    if (fs.existsSync(partPath)) {
-      const part = fs.readFileSync(partPath);
-      fs.appendFileSync(dataPath, part);
-      fs.unlinkSync(partPath);
+  try {
+    for (let i = 0; i < n; i++) {
+      const partPath = dataPath + '.' + i;
+      if (fs.existsSync(partPath)) {
+        await pipeline(
+          fs.createReadStream(partPath),
+          fs.createWriteStream(dataPath, { flags: 'a' })
+        );
+        fs.unlinkSync(partPath);
+      }
     }
+  } catch (err) {
+    console.error('Concat pipeline error:', err);
+    return res.status(500).json({ error: '拼接分片文件失败' });
   }
 
   const hours = parseInt(expiresIn) || 24;
