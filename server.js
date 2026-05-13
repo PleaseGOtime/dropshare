@@ -415,19 +415,21 @@ cron.schedule('*/30 * * * *', () => {
 // ─── Start Server ────────────────────────────────────────────────
 const localIP = getLocalIP();
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✓ DropShare 已启动`);
-  console.log(`  ────────────────────────────`);
-  console.log(`  本机:   http://localhost:${PORT}`);
-  if (PUBLIC_URL) {
-    console.log(`  公网:   ${PUBLIC_URL}`);
-  } else {
-    console.log(`  手机:   http://${localIP}:${PORT}`);
-  }
-  console.log(`  ────────────────────────────`);
-  console.log(`  上传目录: ${UPLOAD_DIR}`);
-  console.log(`  最大文件: ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)}MB`);
-});
+if (process.env.DISABLE_HTTP !== 'true') {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n✓ DropShare 已启动`);
+    console.log(`  ────────────────────────────`);
+    console.log(`  本机:   http://localhost:${PORT}`);
+    if (PUBLIC_URL) {
+      console.log(`  公网:   ${PUBLIC_URL}`);
+    } else {
+      console.log(`  手机:   http://${localIP}:${PORT}`);
+    }
+    console.log(`  ────────────────────────────`);
+    console.log(`  上传目录: ${UPLOAD_DIR}`);
+    console.log(`  最大文件: ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)}MB`);
+  });
+}
 
 // HTTPS (for Web Crypto on mobile)
 if (ensureCert()) {
