@@ -145,11 +145,12 @@ app.post('/api/upload/init', uploadLimiter, (req, res) => {
   }
 });
 
-// ─── Upload: Single streaming body (raw binary, written to disk) ───
-// Browser encrypts chunks 4MB at a time and streams them via a single
-// HTTP request — zero per-chunk overhead, natural backpressure.
-app.post('/api/upload/:code/stream', (req, res) => {
-  const { code } = req.params;
+// ─── Upload: Parallel chunk (each chunk → separate part file) ──────
+// Client uploads 3 chunks at once via concurrent HTTP requests,
+// maximizing throughput on bandwidth-limited connections.
+// Server stores each chunk as data.enc.<N>; concatenated at /complete.
+app.post('/api/upload/:code/chunk/:index', (req, res) => {
+  const { code, index } = req.params;
 
   if (!/^[a-zA-Z0-9]+$/.test(code)) {
     return res.status(400).json({ error: '无效的分享码' });
@@ -160,27 +161,27 @@ app.post('/api/upload/:code/stream', (req, res) => {
     return res.status(404).json({ error: '上传会话不存在' });
   }
 
-  const dataPath = getDataPath(code);
-  const writeStream = fs.createWriteStream(dataPath);
+  const partPath = getDataPath(code) + '.' + index;
+  const writeStream = fs.createWriteStream(partPath);
 
   req.pipe(writeStream);
 
   writeStream.on('finish', () => {
-    res.json({ success: true });
+    if (!res.headersSent) res.json({ success: true });
   });
 
   writeStream.on('error', (err) => {
-    console.error('Stream write error:', err);
-    if (!res.headersSent) res.status(500).json({ error: '写入失败' });
+    console.error('Chunk write error:', err);
+    if (!res.headersSent) res.status(500).json({ error: '写入分片失败' });
   });
 
   req.on('error', (err) => {
-    console.error('Stream read error:', err);
-    if (!res.headersSent) res.status(500).json({ error: '读取失败' });
+    console.error('Chunk read error:', err);
+    if (!res.headersSent) res.status(500).json({ error: '读取分片失败' });
   });
 });
 
-// ─── Upload: Complete (write metadata) ────────────────────────────
+// ─── Upload: Complete (concatenate part files + write metadata) ────
 app.post('/api/upload/:code/complete', uploadLimiter, (req, res) => {
   const { code } = req.params;
 
@@ -199,6 +200,18 @@ app.post('/api/upload/:code/complete', uploadLimiter, (req, res) => {
     return res.status(400).json({ error: '缺少必要参数' });
   }
 
+  // Concatenate part files (data.enc.0, data.enc.1, ...) into data.enc
+  const dataPath = getDataPath(code);
+  const n = parseInt(numChunks) || 1;
+  for (let i = 0; i < n; i++) {
+    const partPath = dataPath + '.' + i;
+    if (fs.existsSync(partPath)) {
+      const part = fs.readFileSync(partPath);
+      fs.appendFileSync(dataPath, part);
+      fs.unlinkSync(partPath);
+    }
+  }
+
   const hours = parseInt(expiresIn) || 24;
   const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
 
@@ -213,7 +226,7 @@ app.post('/api/upload/:code/complete', uploadLimiter, (req, res) => {
     downloadCount: 0,
     createdAt: new Date().toISOString(),
     chunkSize: parseInt(chunkSize) || 0,
-    numChunks: parseInt(numChunks) || 1,
+    numChunks: n,
   };
 
   try {

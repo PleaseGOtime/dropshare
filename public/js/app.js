@@ -7,7 +7,8 @@ const state = {
 };
 
 /* ─── Constants ────────────────────────────────────────── */
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB per chunk — low memory, good for large files
+const CHUNK_SIZE = 32 * 1024 * 1024; // 32MB — fewer chunks = less overhead
+const UPLOAD_POOL = 3;               // concurrent upload connections
 
 /* ─── DOM refs ─────────────────────────────────────────── */
 const $ = (sel) => document.querySelector(sel);
@@ -93,27 +94,6 @@ function setProgress(el, fillEl, textEl, pct, text) {
 function hideProgress(el, fillEl) {
   el.classList.add('hidden');
   fillEl.style.width = '0%';
-}
-
-/* ─── Upload Blob with XHR progress ───────────────────── */
-function uploadBlobWithProgress(url, blob, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', url);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(e.loaded, e.total);
-    };
-
-    xhr.onload = () => {
-      resolve({ ok: xhr.status >= 200 && xhr.status < 300, json: () => JSON.parse(xhr.responseText) });
-    };
-
-    xhr.onerror = () => reject(new Error('网络错误'));
-    xhr.ontimeout = () => reject(new Error('上传超时'));
-    xhr.send(blob);
-  });
 }
 
 /* ─── Crypto (AES-GCM + PBKDF2) ─────────────────────────── */
@@ -231,7 +211,7 @@ function resetUploadResult() {
   hideProgress(dom.progressWrap, dom.progressFill);
 }
 
-/* ─── Upload (Streaming Encrypt + Single Request) ──────────── */
+/* ─── Upload (Parallel Chunks) ──────────────────────────── */
 dom.uploadBtn.addEventListener('click', uploadFile);
 
 async function uploadFile() {
@@ -274,53 +254,49 @@ async function uploadFile() {
       keyB64 = await exportKey(masterKey);
     }
 
-    // 3) Encrypt all chunks into a single Blob, then upload in one request
-    //    Each chunk is encrypted separately (low memory: 4MB at a time),
-    //    but the upload is a single HTTP call (no per-chunk overhead).
-    const encryptedParts = [];
+    // 3) Parallel upload pool — 3 concurrent connections maximize
+    //    throughput on bandwidth-limited servers.
+    let nextIndex = 0;
+    let completed = 0;
+    let failed = false;
 
-    for (let i = 0; i < numChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, fileSize);
+    async function worker() {
+      while (nextIndex < numChunks && !failed) {
+        const i = nextIndex++;
 
-      const chunkData = await file.slice(start, end).arrayBuffer();
+        // Read & encrypt one chunk (32MB at a time — low memory overhead)
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileSize);
+        const chunkData = await file.slice(start, end).arrayBuffer();
 
-      const chunkIV = deriveChunkIV(masterIV, i);
-      const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: chunkIV }, masterKey, chunkData
-      );
+        const chunkIV = deriveChunkIV(masterIV, i);
+        const encrypted = await crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: chunkIV }, masterKey, chunkData
+        );
 
-      encryptedParts.push(encrypted);
+        // Upload to its own part file (no collision — each chunk -> data.enc.<i>)
+        const resp = await fetch(`/api/upload/${code}/chunk/${i}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: encrypted,
+        });
+        if (!resp.ok) {
+          failed = true;
+          throw new Error(`分片 ${i + 1}/${numChunks} 上传失败`);
+        }
 
-      const pct = Math.round((i / numChunks) * 85);
-      setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
-        pct, `加密中 (${Math.min(i + 1, numChunks)}/${numChunks})`);
-
-      // Yield to let UI update periodically
-      if (i % 10 === 0) await new Promise(r => setTimeout(r, 10));
-    }
-
-    // Build single blob and upload with real progress tracking
-    setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 85, '上传中...');
-    const encryptedBlob = new Blob(encryptedParts);
-    encryptedParts.length = 0; // allow GC to free individual ArrayBuffers
-
-    const uploadResp = await uploadBlobWithProgress(
-      `/api/upload/${code}/stream`,
-      encryptedBlob,
-      (loaded, total) => {
-        const pct = 85 + Math.round((loaded / total) * 14);
+        completed++;
+        const pct = Math.round((completed / numChunks) * 90);
         setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
-          pct, `上传中 (${formatSize(loaded)}/${formatSize(total)})`);
+          pct, `上传中 (${completed}/${numChunks})`);
       }
-    );
-    if (!uploadResp.ok) {
-      const err = await uploadResp.json();
-      throw new Error(err.error || '上传失败');
     }
 
-    // 5) Complete upload (write metadata)
-    setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 90, '完成上传');
+    const workers = Array.from({ length: UPLOAD_POOL }, () => worker());
+    await Promise.all(workers);
+
+    // 4) Complete — server concatenates part files into data.enc
+    setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 95, '完成上传');
     const completeResp = await fetch(`/api/upload/${code}/complete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
