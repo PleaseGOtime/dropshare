@@ -48,6 +48,8 @@ const dom = {
 
   receiveCode:  $('#receiveCode'),
   receivePw:    $('#receivePw'),
+  receiveKey:   $('#receiveKey'),
+  keyRow:       $('#keyRow'),
   pwRow:        $('#pwRow'),
   receiveBtn:   $('#receiveBtn'),
   receiveBtnText: $('#receiveBtnText'),
@@ -430,9 +432,14 @@ async function fetchFileInfo() {
 
     if (meta.hasPassword) {
       dom.pwRow.classList.remove('hidden');
+      dom.keyRow.classList.add('hidden');
     } else {
       dom.pwRow.classList.add('hidden');
       dom.receivePw.value = '';
+      dom.keyRow.classList.remove('hidden');
+      // Auto-fill key from URL hash (passwordless mode)
+      const hashKey = extractKeyFromHash();
+      dom.receiveKey.value = hashKey || '';
     }
 
     // Store full metadata on download button for later use
@@ -461,6 +468,9 @@ async function downloadAndDecrypt() {
   const code = state.shareCode;
   if (!code) return;
 
+  // Show progress immediately — PBKDF2 (600k iterations) blocks 1-2s
+  setProgress(dom.receiveProgress, dom.receiveProgressFill, dom.receiveProgressText, 0, '连接中...');
+
   dom.downloadBtn.disabled = true;
   dom.downloadBtn.textContent = '下载中...';
 
@@ -476,21 +486,16 @@ async function downloadAndDecrypt() {
     const masterIV = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
 
     // 1) Resolve decryption key
-    let keyB64 = null, password = null;
-    if (!hasPassword) {
-      keyB64 = extractKeyFromHash();
-    } else {
-      password = dom.receivePw.value.trim();
-      if (!password) throw new Error('请输入解密密码');
-    }
-
-    let salt = null;
-    if (saltB64) salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
-
     let masterKey;
-    if (keyB64) {
+    if (!hasPassword) {
+      const keyB64 = dom.receiveKey.value.trim();
+      if (!keyB64) throw new Error('解密密钥不存在，请检查分享链接是否包含 #密钥');
       masterKey = await importKey(keyB64);
     } else {
+      const password = dom.receivePw.value.trim();
+      if (!password) throw new Error('请输入解密密码');
+      let salt = null;
+      if (saltB64) salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
       masterKey = await deriveKey(password, salt);
     }
 
