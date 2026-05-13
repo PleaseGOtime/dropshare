@@ -1,6 +1,5 @@
 require('dotenv').config();
 const express = require('express');
-const multer = require('multer');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
@@ -15,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT) || 3443;
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || './uploads');
-const PUBLIC_URL = process.env.PUBLIC_URL || ''; // e.g. https://dropshare.example.com
+const PUBLIC_URL = process.env.PUBLIC_URL || '';
 
 // Trust proxy (Nginx/Caddy reverse proxy)
 if (process.env.TRUST_PROXY === 'true') {
@@ -60,6 +59,7 @@ function ensureCert() {
   }
   return true;
 }
+
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 1073741824; // 1GB
 const UPLOAD_MAX = parseInt(process.env.UPLOAD_MAX) || 50;
 const DOWNLOAD_MAX = parseInt(process.env.DOWNLOAD_MAX) || 200;
@@ -89,14 +89,11 @@ app.use((req, res, next) => {
 // ─── CORS ───────────────────────────────────────────────────────────
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*', methods: ['GET', 'POST'] }));
 
+// ─── Body Parser (JSON API only) ─────────────────────────────────────
+app.use(express.json({ limit: '1mb' }));
+
 // ─── Static Files ──────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
-
-// ─── Multer (file upload) ──────────────────────────────────────────
-const upload = multer({
-  dest: path.join(UPLOAD_DIR, 'temp'),
-  limits: { fileSize: MAX_FILE_SIZE },
-});
 
 // ─── Rate Limiters ─────────────────────────────────────────────────
 const uploadLimiter = rateLimit({
@@ -128,69 +125,122 @@ function generateCode() {
   return uuidv4().replace(/-/g, '').substring(0, 12);
 }
 
-// ─── Upload ────────────────────────────────────────────────────────
-app.post('/api/upload', uploadLimiter, upload.single('file'), async (req, res) => {
+// ─── Upload: Init Session ──────────────────────────────────────────
+app.post('/api/upload/init', uploadLimiter, (req, res) => {
+  const code = generateCode();
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: '请选择要上传的文件' });
-    }
-
-    const { filename, iv, salt, hasPassword, expiresIn } = req.body;
-
-    if (!filename || !iv) {
-      // Cleanup temp file
-      fs.unlink(req.file.path, () => {});
-      return res.status(400).json({ error: '缺少必要参数' });
-    }
-
-    const code = generateCode();
-    const fileDir = getFileDir(code);
-    fs.mkdirSync(fileDir, { recursive: true });
-
-    // Move temp file to final location
-    const dataPath = getDataPath(code);
-    fs.renameSync(req.file.path, dataPath);
-
-    // Expiry time
-    const hours = parseInt(expiresIn) || 24;
-    const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
-
-    // Metadata
-    const metadata = {
-      filename: filename,
-      size: req.file.size,
-      iv: iv,
-      salt: salt || null,
-      hasPassword: hasPassword === 'true',
-      expiresAt: expiresAt,
-      maxDownloads: 0, // 0 = unlimited
-      downloadCount: 0,
-      createdAt: new Date().toISOString(),
-    };
-
-    fs.writeFileSync(getMetadataPath(code), JSON.stringify(metadata, null, 2));
-
-    res.json({
-      code,
-      url: `/dl/${code}`,
-      fullUrl: PUBLIC_URL ? `${PUBLIC_URL}/dl/${code}` : undefined,
-      expiresAt,
-    });
+    fs.mkdirSync(getFileDir(code), { recursive: true });
+    res.json({ code });
   } catch (err) {
-    console.error('Upload error:', err);
-    // Cleanup temp file if it exists
-    if (req.file && req.file.path) {
-      fs.unlink(req.file.path, () => {});
-    }
-    res.status(500).json({ error: '上传失败，请重试' });
+    console.error('Init error:', err);
+    res.status(500).json({ error: '初始化上传失败' });
   }
+});
+
+// ─── Upload: Chunk (raw binary, streamed to disk) ──────────────────
+// No rate limit — init/complete already gate session creation.
+// Chunks are sent sequentially, so no file-corruption race.
+app.post('/api/upload/:code/chunk/:index', (req, res) => {
+  const { code } = req.params;
+
+  if (!/^[a-zA-Z0-9]+$/.test(code)) {
+    return res.status(400).json({ error: '无效的分享码' });
+  }
+
+  const fileDir = getFileDir(code);
+  if (!fs.existsSync(fileDir)) {
+    return res.status(404).json({ error: '上传会话不存在' });
+  }
+
+  const dataPath = getDataPath(code);
+
+  // Enforce max file size
+  const currentSize = fs.existsSync(dataPath) ? fs.statSync(dataPath).size : 0;
+  const contentLength = parseInt(req.headers['content-length']) || 0;
+  if (currentSize + contentLength > MAX_FILE_SIZE) {
+    return res.status(413).json({ error: `文件超过大小限制 ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)}MB` });
+  }
+
+  const writeStream = fs.createWriteStream(dataPath, { flags: 'a' });
+
+  req.pipe(writeStream);
+
+  writeStream.on('finish', () => {
+    res.json({ success: true });
+  });
+
+  writeStream.on('error', (err) => {
+    console.error('Chunk write error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: '写入分片失败' });
+    }
+  });
+
+  req.on('error', (err) => {
+    console.error('Chunk read error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: '读取分片失败' });
+    }
+  });
+});
+
+// ─── Upload: Complete (write metadata) ────────────────────────────
+app.post('/api/upload/:code/complete', uploadLimiter, (req, res) => {
+  const { code } = req.params;
+
+  if (!/^[a-zA-Z0-9]+$/.test(code)) {
+    return res.status(400).json({ error: '无效的分享码' });
+  }
+
+  const fileDir = getFileDir(code);
+  if (!fs.existsSync(fileDir)) {
+    return res.status(404).json({ error: '上传会话不存在' });
+  }
+
+  const { filename, iv, salt, hasPassword, expiresIn, chunkSize, numChunks, size } = req.body;
+
+  if (!filename || !iv) {
+    return res.status(400).json({ error: '缺少必要参数' });
+  }
+
+  const hours = parseInt(expiresIn) || 24;
+  const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+
+  const metadata = {
+    filename,
+    size: parseInt(size),
+    iv,
+    salt: salt || null,
+    hasPassword: hasPassword === 'true',
+    expiresAt,
+    maxDownloads: 0,
+    downloadCount: 0,
+    createdAt: new Date().toISOString(),
+    chunkSize: parseInt(chunkSize) || 0,
+    numChunks: parseInt(numChunks) || 1,
+  };
+
+  try {
+    fs.writeFileSync(getMetadataPath(code), JSON.stringify(metadata, null, 2));
+  } catch (err) {
+    console.error('Metadata write error:', err);
+    return res.status(500).json({ error: '写入元数据失败' });
+  }
+
+  const fullUrl = PUBLIC_URL ? `${PUBLIC_URL}/dl/${code}` : undefined;
+
+  res.json({
+    code,
+    url: `/dl/${code}`,
+    fullUrl,
+    expiresAt,
+  });
 });
 
 // ─── Get Metadata ──────────────────────────────────────────────────
 app.get('/api/info/:code', downloadLimiter, (req, res) => {
   const { code } = req.params;
 
-  // Sanitize: only allow alphanumeric
   if (!/^[a-zA-Z0-9]+$/.test(code)) {
     return res.status(400).json({ error: '无效的分享码' });
   }
@@ -204,7 +254,6 @@ app.get('/api/info/:code', downloadLimiter, (req, res) => {
 
   // Check expiry
   if (new Date(metadata.expiresAt) < new Date()) {
-    // Cleanup expired file
     fs.rmSync(getFileDir(code), { recursive: true, force: true });
     return res.status(410).json({ error: '文件已过期' });
   }
@@ -224,10 +273,12 @@ app.get('/api/info/:code', downloadLimiter, (req, res) => {
     expiresAt: metadata.expiresAt,
     downloadCount: metadata.downloadCount,
     maxDownloads: metadata.maxDownloads,
+    chunkSize: metadata.chunkSize || 0,
+    numChunks: metadata.numChunks || 1,
   });
 });
 
-// ─── Download Encrypted Data ──────────────────────────────────────
+// ─── Download Encrypted Data (zero-copy via sendFile) ──────────────
 app.get('/api/data/:code', downloadLimiter, (req, res) => {
   const { code } = req.params;
 
@@ -260,20 +311,18 @@ app.get('/api/data/:code', downloadLimiter, (req, res) => {
   metadata.downloadCount++;
   fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
 
-  // Send the encrypted file
+  // Custom headers for the client
   res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Length', fs.statSync(dataPath).size);
   res.setHeader('X-Filename', encodeURIComponent(metadata.filename));
-  res.setHeader('X-Has-Password', metadata.hasPassword);
+  res.setHeader('X-Has-Password', String(metadata.hasPassword));
   res.setHeader('X-IV', metadata.iv);
   res.setHeader('X-Salt', metadata.salt || '');
   res.setHeader('Access-Control-Expose-Headers', 'X-Filename, X-Has-Password, X-IV, X-Salt');
 
-  const stream = fs.createReadStream(dataPath);
-  stream.pipe(res);
-
-  stream.on('error', () => {
-    res.status(500).json({ error: '下载失败' });
+  // sendFile uses kernel sendfile syscall — zero-copy from disk to socket
+  res.sendFile(dataPath, {
+    acceptRanges: true,
+    cacheControl: false,
   });
 });
 
@@ -309,7 +358,6 @@ app.get('/api/qr/:code', async (req, res) => {
 });
 
 // ─── SPA Fallback ─────────────────────────────────────────────────
-// /dl/:code and /dl both serve the main page; JS reads code from URL
 app.get('/dl*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -317,15 +365,26 @@ app.get('/dl*', (req, res) => {
 // ─── Cleanup Cron (every 30 minutes) ──────────────────────────────
 cron.schedule('*/30 * * * *', () => {
   const dirs = fs.readdirSync(UPLOAD_DIR).filter((d) => {
-    // Skip temp directory
-    if (d === 'temp') return false;
-    const metaPath = path.join(UPLOAD_DIR, d, 'metadata.json');
-    if (!fs.existsSync(metaPath)) return false;
+    const dirPath = path.join(UPLOAD_DIR, d);
+    // Only process directories (skip stray files like Thumbs.db)
+    try { if (!fs.statSync(dirPath).isDirectory()) return false; } catch { return false; }
+    const metaPath = path.join(dirPath, 'metadata.json');
+
+    // Incomplete upload (no metadata) — remove after 24 h
+    if (!fs.existsSync(metaPath)) {
+      try {
+        const stat = fs.statSync(dirPath);
+        return Date.now() - stat.mtimeMs > 24 * 60 * 60 * 1000;
+      } catch {
+        return false;
+      }
+    }
+
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       return new Date(meta.expiresAt) < new Date();
     } catch {
-      return true; // Corrupted = delete
+      return true;
     }
   });
 
@@ -334,12 +393,6 @@ cron.schedule('*/30 * * * *', () => {
     console.log(`[Cleanup] Deleted expired file: ${dir}`);
   }
 });
-
-// Ensure temp directory exists
-const tempDir = path.join(UPLOAD_DIR, 'temp');
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
 
 // ─── Start Server ────────────────────────────────────────────────
 const localIP = getLocalIP();

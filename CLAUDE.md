@@ -6,8 +6,8 @@
 
 ```
 dropshare/
-├── server.js            # Express 服务端：上传/下载/二维码/定时清理
-├── package.json         # 依赖：express, multer, cors, dotenv, qrcode, uuid, node-cron
+├── server.js            # Express 服务端：分片上传/下载/二维码/定时清理
+├── package.json         # 依赖：express, cors, dotenv, qrcode, uuid, node-cron
 ├── ecosystem.config.js  # PM2 进程配置（单进程 fork 模式，1.5G 内存上限）
 ├── .env                 # 本地配置（已 gitignore）
 ├── .env.example         # 配置模板
@@ -16,9 +16,8 @@ dropshare/
 ├── public/
 │   ├── index.html       # SPA 入口（发送/接收两个面板）
 │   ├── css/style.css    # 深色主题 UI
-│   └── js/app.js        # 前端逻辑：Web Crypto 加密/解密、上传下载、二维码
+│   └── js/app.js        # 前端逻辑：Web Crypto 加密/解密、分片上传流式下载
 ├── uploads/             # 上传文件存储（gitignore）
-│   └── temp/            # multer 临时目录
 └── certs/               # 自签名证书（gitignore）
     ├── key.pem
     └── cert.pem
@@ -26,11 +25,14 @@ dropshare/
 
 ## 关键设计
 
-- **加密**：浏览器端 AES-256-GCM 加密，密钥通过 URL hash 传递（不经过网络），或由接收方输入密码（PBKDF2 600000 次迭代）
-- **存储**：每个分享码一个目录，内放 `data.enc`（密文）和 `metadata.json`（文件名/IV/salt/有效期）
-- **清理**：`node-cron` 每 30 分钟扫描并删除过期文件
+- **加密**：浏览器端 AES-256-GCM 加密，文件按 4MB 分片加密（每片独立 IV），密钥通过 URL hash 传递（不经过网络），或由接收方输入密码（PBKDF2 600000 次迭代）
+- **存储**：每个分享码一个目录，内放 `data.enc`（密文）和 `metadata.json`（文件名/IV/分片信息/有效期）
+- **分片上传**：`/api/upload/init` 创建会话 → `/api/upload/:code/chunk/:index` 逐片上传（HTTP Body 直写磁盘，零拷贝） → `/api/upload/:code/complete` 写入元数据
+- **零拷贝下载**：`res.sendFile()` 使用内核 `sendfile` 系统调用，数据从磁盘直达网卡 socket，不经过用户态内存
+- **流式下载**：客户端 `response.body.getReader()` 逐片读取 → 即时解密 → 渐进拼接，无需等待完整下载
+- **清理**：`node-cron` 每 30 分钟扫描并删除过期文件（未完成的半截上传 24h 后自动清理）
 - **HTTPS**：首次运行自动用 openssl 生成自签名证书（手机端 Web Crypto 需要 HTTPS）
-- **速率限制**：上传 30次/15分钟，下载 100次/15分钟
+- **速率限制**：上传会话创建 30次/15分钟，下载 100次/15分钟
 
 ## 配置 (.env)
 
