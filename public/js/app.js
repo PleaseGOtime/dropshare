@@ -290,6 +290,7 @@ async function uploadFile() {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: encryptedStream,
+      duplex: 'half',
     });
     if (!uploadResp.ok) throw new Error('上传失败');
 
