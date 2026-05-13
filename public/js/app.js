@@ -95,6 +95,27 @@ function hideProgress(el, fillEl) {
   fillEl.style.width = '0%';
 }
 
+/* ─── Upload Blob with XHR progress ───────────────────── */
+function uploadBlobWithProgress(url, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+
+    xhr.onload = () => {
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, json: () => JSON.parse(xhr.responseText) });
+    };
+
+    xhr.onerror = () => reject(new Error('网络错误'));
+    xhr.ontimeout = () => reject(new Error('上传超时'));
+    xhr.send(blob);
+  });
+}
+
 /* ─── Crypto (AES-GCM + PBKDF2) ─────────────────────────── */
 
 async function generateKey() {
@@ -279,18 +300,24 @@ async function uploadFile() {
       if (i % 10 === 0) await new Promise(r => setTimeout(r, 10));
     }
 
-    // Build single blob and upload in one request
-    setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 85, '上传中');
+    // Build single blob and upload with real progress tracking
+    setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 85, '上传中...');
     const encryptedBlob = new Blob(encryptedParts);
-    // Clear the parts array so GC can free the individual ArrayBuffers
-    encryptedParts.length = 0;
+    encryptedParts.length = 0; // allow GC to free individual ArrayBuffers
 
-    const uploadResp = await fetch(`/api/upload/${code}/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: encryptedBlob,
-    });
-    if (!uploadResp.ok) throw new Error('上传失败');
+    const uploadResp = await uploadBlobWithProgress(
+      `/api/upload/${code}/stream`,
+      encryptedBlob,
+      (loaded, total) => {
+        const pct = 85 + Math.round((loaded / total) * 14);
+        setProgress(dom.progressWrap, dom.progressFill, dom.progressText,
+          pct, `上传中 (${formatSize(loaded)}/${formatSize(total)})`);
+      }
+    );
+    if (!uploadResp.ok) {
+      const err = await uploadResp.json();
+      throw new Error(err.error || '上传失败');
+    }
 
     // 5) Complete upload (write metadata)
     setProgress(dom.progressWrap, dom.progressFill, dom.progressText, 90, '完成上传');
